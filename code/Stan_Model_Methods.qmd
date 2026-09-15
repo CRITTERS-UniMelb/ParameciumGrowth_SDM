@@ -1,0 +1,30 @@
+---
+title: "Growth Model Methods"
+format: html
+embed-resources: true
+---
+
+This document summarises the model for paramecium growth.
+
+The general model for logistic growth is given below, where the predicted number of paramecium in each well *i* at each timestep *t* ($N_{i,t}$) is determined by carrying capacity $K_i$ , initial observed population $N_{i,0}$, and instantaneous growth rate $r_i$:\
+$$\mu_{N_{i,t}}=\frac {K_i}{1+\frac{K_i-N_{i,0}}{N_{i,0}}e^{-r_it}}$$
+
+Expected carrying capacity scales exponentially with food concentration. In this formulation, at a concentration of 0 carrying capacity is expected to equal 1.
+
+$$\mu_{K_i}=e^{\beta_{conc}*conc_i}$$
+
+The instantaneous growth rate for a well is expected to scale with temperature. This relationship is expected to be quadratic. The temp variable is rescaled by subtracting the optimal temperature for paramecium (24 degrees C) from the well temperature, such that the temp variable represent deviation from optimal conditions.
+
+$$\mu_{r_i}=\alpha+\beta_{temp}temp_i+\beta_{temp2}temp_i^2$$
+
+In realistic conditions, carrying capacity and growth rate are expected to vary by well due to other unknown factors. True K for each well is modelled as a draw from a lognormal distribution with location $log(\mu_{{K}_i})$. This formulation allows greater variability in *K* at higher predicted values, i.e., at higher concentrations of food resources.
+
+$$K_i \sim lognormal(log(\mu_{K_i}), \sigma_K)$$
+
+Growth rate for each well *i* is modelled as a draw from a normal distribution (truncated at 0 to prevent negative growth rates) with mean $\mu_{r_i}$ and standard deviation $\sigma_r$:
+
+$$r_i \sim normal(\mu_{r_i}, \sigma_r) T(0,)$$
+
+The observed number of paramecium at each timestep is estimated using *Wellcounter-M* and is expected to vary from the true number of individuals. This variation is expected to be greater at higher quantities of paramecium, therefore the observed number at well *i* in time *t* is also estimated as a draw from the lognormal distribution with location $log(\mu_{N_{i,t}})$ and sigma $\sigma_{N}$:
+
+$$N_{i,t} \sim lognormal(log(\mu_{N_{i,t}}), \sigma_{N})$$

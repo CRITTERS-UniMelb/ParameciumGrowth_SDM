@@ -1,1 +1,0 @@
-# ParameciumGrowth_SDM

@@ -1,0 +1,76 @@
+---
+title: "Analyse_Stan_Model"
+format: html
+embed-resources: true
+---
+
+```{r Packages}
+library(tidyverse)
+library(rstan)
+library(tidybayes)
+```
+
+```{r Load_Model}
+growthModel <- read_rds("outputs/stan_model.rds")
+```
+
+```{r summary table}
+print(growthModel, 
+      pars = c('a_r', 'b_temp', 'b_temp2',
+               'b_conc', 'sigma_particles', 'sigma_k', 'sd_r'), 
+      digits_summary = 6)
+
+```
+
+```{r traceplots}
+traceplot(growthModel, 
+          pars = c('a_r', 'b_temp', 'b_temp2',
+                   'b_conc', 'sigma_particles', 'sigma_k', 'sd_r'))
+```
+
+```{r parameter_posteriors}
+growthModel |>
+  spread_draws(a_r, b_temp, b_temp2, b_conc,
+               sigma_particles, sigma_k, sd_r) |>
+  gather_variables() |>
+  mutate(medval = median(.value)) |>
+  ggplot(aes(x = .value)) +
+  geom_histogram(fill = "cadetblue4") +
+  geom_vline(aes(xintercept = medval), 
+             colour = "sienna3", linewidth = 1) +
+  labs(x = "", y = "") +
+  facet_wrap(facets = vars(.variable),
+             scales = 'free') +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        panel.grid.minor = element_blank())
+```
+
+```{r predicted_r}
+growthModel |>
+  spread_draws(a_r, b_temp, b_temp2) |>
+  mutate(temp = 0) |>
+  complete(nesting(.chain,.iteration,.draw,a_r,b_temp,b_temp2),
+           temp = seq(-5, 5)) |>
+  mutate(pred_r = a_r+(b_temp*temp)+(b_temp2*(temp^2))) |>
+  ggplot(aes(x = temp, y = pred_r)) +
+  stat_lineribbon(aes(y = pred_r), 
+                  .width = c(.99, .95, .8, .5), 
+                  color = "#08519C") +
+  scale_fill_brewer()
+```
+
+```{r predicted_k}
+growthModel |>
+  spread_draws(b_conc) |>
+  mutate(conc = 0) |>
+  complete(nesting(.chain,.iteration,.draw,b_conc),
+           conc = seq(0, 0.5, by = .1)) |>
+  mutate(pred_k = exp(b_conc*conc)) |>
+  ggplot(aes(x = conc, y = pred_k)) +
+  stat_lineribbon(aes(y = pred_k), 
+                  .width = c(.99, .95, .8, .5), 
+                  color = "#08519C") +
+  scale_fill_brewer()
+
+
+```
