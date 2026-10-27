@@ -1,0 +1,157 @@
+---
+title: "NoDataModel"
+format: html
+---
+
+```{r Packages}
+library(tidyverse)
+library(rstan)
+library(truncnorm)
+```
+
+```{r Model}
+growthModel_script <- "
+  data {
+    // Prediction data
+    int<lower=1> N_obs_tilde;
+    int<lower=1> well_tilde;
+    vector[well_tilde] conc_tilde;
+    vector[well_tilde] temp_tilde;
+    array[N_obs_tilde] int<lower=1> well_i_tilde;
+    array[N_obs_tilde] int<lower=1> timestep_tilde;
+    vector<lower=1>[well_tilde] n0_tilde;
+  }
+  
+  // Normalise temperatures for prediction
+  transformed data {
+    # Prediction data
+    vector[well_tilde] temp_norm_tilde = temp_tilde-24;
+  }
+  
+  // Predictions for testing wells
+  generated quantities {
+    vector[N_obs_tilde] mu_particles_tilde;
+    vector[N_obs_tilde] particles_tilde;
+    vector[well_tilde] K_tilde;
+    vector[well_tilde] r_tilde;
+  
+    // Priors
+    real sigma_k = exponential_rng(1);
+    real sd_r = exponential_rng(1);
+    real sigma_particles = exponential_rng(1);
+    real a_conc = uniform_rng(0, 10);
+    real a_r = exponential_rng(1);
+    real b_conc = normal_rng(12, 6);
+    real b_temp = normal_rng(0, 2.5);
+    real b_temp2 = normal_rng(0, 2.5);
+    
+    // Estimated K/r for prediction wells
+    vector[well_tilde] k_mu_tilde = (exp(a_conc+(b_conc*conc_tilde)));
+    vector[well_tilde] r_mu_tilde = a_r+(b_temp*temp_norm_tilde)+(b_temp2*(temp_norm_tilde^2));
+    
+    // Carrying capacity/growth rate for predictions
+    for (j in 1:well_tilde){
+      K_tilde[j] = lognormal_rng(log(k_mu_tilde[j]), sigma_k);
+      r_tilde[j] = normal_rng(r_mu_tilde[j], sd_r);
+    }
+    
+    
+    // Estimated number of particles
+    for (i in 1:N_obs_tilde){
+      mu_particles_tilde[i] = K_tilde[well_i_tilde[i]]/(1+((K_tilde[well_i_tilde[i]]-n0_tilde[well_i_tilde[i]])/n0_tilde[well_i_tilde[i]])*exp(-1*r_tilde[well_i_tilde[i]]*timestep_tilde[i]));
+      // Use lognormal_rng to estimate
+      particles_tilde[i] = lognormal_rng(log(mu_particles_tilde[i]+1.001), sigma_particles);
+    }
+  }
+"
+```
+
+```{r SimData}
+tempConc_combinations <- expand.grid(conc = c(0.1, 0.2, 0.3, 0.4, 0.5),
+                                     temp = c(18, 21, 24, 27)) |>
+  mutate(ID = 1:20)
+
+paramecium_data <- data.frame(well = sort(rep(1:200,51)),
+                              timestep = rep(0:50,200)) |>
+  mutate(ID = ceiling(well/10)) |>
+  left_join(tempConc_combinations, by = "ID") |>
+  mutate(particles = if_else(timestep == 0, 20, NA))
+  
+n0_vals <- paramecium_data |>
+  filter(timestep == 0) |>
+  pull(particles)
+  
+well_details <- paramecium_data |>
+  select(well, conc, temp) |>
+  distinct()
+
+paramecium_counts <- paramecium_data |>
+  select(well, timestep, conc, temp) |>
+  filter_out(timestep == 0)
+
+model_data <- list(n0_tilde = n0_vals,
+                   temp_tilde = well_details$temp,
+                   conc_tilde = well_details$conc,
+                   timestep_tilde = paramecium_counts$timestep,
+                   well_i_tilde = paramecium_counts$well,
+                   well_tilde = nrow(well_details),
+                   N_obs_tilde = nrow(paramecium_counts))
+```
+
+```{r InitialValues}
+makeInits <- function(model_data){
+  
+  # Parameter starting values
+  outList <- list(sigma_particles = runif(1, 0.1, 0.5),
+                  sd_r = runif(1, 0.1, 1), 
+                  sigma_k = runif(1, 0.1, 1),
+                  a_conc = runif(1, 0.1, 2),
+                  a_r = runif(1, 0.1, 2), 
+                  b_conc = runif(1, 7, 12),
+                  b_temp = runif(1, -.1, 0),
+                  b_temp2 = runif(1, -.1, 0))
+
+  # Create starting values for prediction data
+  simData_tilde <- data.frame(well = 1:model_data$well_tilde,
+                              temp_tilde = model_data$temp_tilde-24,
+                              conc_tilde = model_data$conc_tilde) |>
+    mutate(K_tilde = (exp(outList$a_conc + (conc_tilde*outList$b_conc))),
+           r_tilde = outList$a_r +
+             (outList$b_temp*temp_tilde) +
+             (outList$b_temp2*(temp_tilde^2))) |>
+    mutate(r_tilde = if_else(r_tilde < 0, 0, r_tilde))
+  
+  outList$r_tilde <- simData_tilde$r_tilde
+  outList$K_tilde <- simData_tilde$K_tildesur
+  outList$r_mu_tilde <- simData_tilde$r_tilde
+  outList$K_mu_tilde <- simData_tilde$K_tilde
+  
+  return(outList)
+}
+```
+
+```{r RunModel}
+
+growthModel_noData <- stan(
+      model_code = growthModel_script,
+      data = model_data,
+      init = list(makeInits(model_data),
+                  makeInits(model_data),
+                  makeInits(model_data),
+                  makeInits(model_data)),
+      algorithm = "Fixed_param",
+      chains = 4,
+      warmup = 2000,
+      iter = 3000,
+      cores = 4,
+      refresh = 500
+    )
+```
+
+```{r ViewModel}
+t<-as.data.frame(summary(growthModel_noData)$summary) |>
+  rownames_to_column("parameter") |>
+  filter(parameter %in% c("a_conc", "a_r", 
+                          "b_conc", "b_temp", "b_temp2",
+                          "sigma_particles", "sigma_k", "sd_r"))
+```

@@ -10,6 +10,7 @@ library(truncnorm)
 ```
 
 ```{r Prep_Data}
+# Training data: Filter this to the experiments/wells used to fit the model
 paramecium_data <- read_csv("data/sdm_data.csv") |>
   select(particles = avg_particles,
          well,
@@ -17,15 +18,14 @@ paramecium_data <- read_csv("data/sdm_data.csv") |>
          timestep,
          conc = conc_correct,
          temp = mean_temp_all) |>
+  filter(experiment %in% c("sdm1", "sdm2")) |>
   mutate(well = paste0(well,experiment)) |>
-  # First value for well 40sdm3 is 0, which breaks model - remove
-  filter_out(well == "40sdm3") |>
   mutate(well = as.numeric(fct(as.character(well))))
-
+# Filter to timesteps of interest
 paramecium_counts <- paramecium_data |>
   select(particles, well, timestep, conc, temp) |>
-  filter_out(is.na(particles)) |>
-  filter_out(timestep == 0)
+  filter(timestep %in% 27:57) |>
+  filter_out(is.na(particles)) 
 
 n0_vals <- paramecium_data |>
   select(particles, well, timestep) |>
@@ -37,7 +37,37 @@ well_details <- paramecium_data |>
   select(well, conc, temp) |>
   distinct()
 
+# ------------------------------------------------------------------------
+# Predict data: filter this to the experiments/wells used to fit the model
+pred_paramecium_data <- read_csv("data/sdm_data.csv") |>
+  select(particles = avg_particles,
+         well,
+         experiment,
+         timestep,
+         conc = conc_correct,
+         temp = mean_temp_all) |>
+  filter(experiment == "sdm4") |>
+  mutate(well = paste0(well, experiment)) |>
+  mutate(well = as.numeric(fct(as.character(well))))
 
+# Filter to timesteps of interest
+pred_paramecium_counts <- pred_paramecium_data |>
+  select(particles, well, timestep, conc, temp) |>
+  filter(timestep %in% 27:57) |>
+  filter_out(is.na(particles)) 
+
+pred_n0_vals <- pred_paramecium_data |>
+  select(particles, well, timestep) |>
+  filter_out(is.na(particles)) |>
+  filter(timestep == 0) |>
+  pull(particles)
+
+pred_well_details <- pred_paramecium_data |>
+  select(well, conc, temp) |>
+  distinct()
+
+
+# Combine into model list --------------------------------------
 model_data <- list(particles = paramecium_counts$particles+1.001,
                    n0 = n0_vals,
                    temp = well_details$temp,
@@ -45,12 +75,21 @@ model_data <- list(particles = paramecium_counts$particles+1.001,
                    timestep = paramecium_counts$timestep,
                    well_i = paramecium_counts$well,
                    well = nrow(well_details),
-                   N_obs = nrow(paramecium_counts))
+                   N_obs = nrow(paramecium_counts),
+                   # Prediction data ------- 
+                   n0_tilde = pred_n0_vals,
+                   temp_tilde = pred_well_details$temp,
+                   conc_tilde = pred_well_details$conc,
+                   timestep_tilde = pred_paramecium_counts$timestep,
+                   well_i_tilde = pred_paramecium_counts$well,
+                   well_tilde = nrow(pred_well_details),
+                   N_obs_tilde = nrow(pred_paramecium_counts))
 ```
 
-```{r Model}
+```{r GrowthModel}
 growthModel <- "
   data {
+    // Training data
     int<lower=1> N_obs;
     int<lower=1> well;
     vector[well] conc;
@@ -59,27 +98,51 @@ growthModel <- "
     array[N_obs] int<lower=1> timestep;
     vector<lower=1>[N_obs] particles;
     vector<lower=1>[well] n0;
+    
+    // Prediction data
+    int<lower=1> N_obs_tilde;
+    int<lower=1> well_tilde;
+    vector[well_tilde] conc_tilde;
+    vector[well_tilde] temp_tilde;
+    array[N_obs_tilde] int<lower=1> well_i_tilde;
+    array[N_obs_tilde] int<lower=1> timestep_tilde;
+    vector<lower=1>[well_tilde] n0_tilde;
   }
   
+  // Normalise temperatures for both training data & prediction
   transformed data {
+    # Training data
     vector[well] temp_norm = temp-24;
+    
+    # Prediction data
+    vector[well_tilde] temp_norm_tilde = temp_tilde-24;
   }
   
   parameters {
+    // Fitting parameters
     vector<lower=0.00001, upper = 1000000>[well] K;
     vector<lower=0, upper = 10>[well] r;
     real<lower=0.001, upper = 10> sigma_k;
     real<lower=0.001, upper = 5> sd_r;
     real<lower=0.001, upper = 10> sigma_particles;
     real<lower=0,upper = 10> a_r;
+    real<lower=0,upper=10> a_conc; 
     real<lower=5,upper = 20> b_conc;
     real<lower=-10,upper=10> b_temp;
     real<lower=-10,upper=10> b_temp2;
+  
+    // Prediction parameters
+    vector<lower=0.00001,upper=1000000>[well_tilde] K_tilde;
+    vector<lower=0,upper=10>[well_tilde] r_tilde;
   }
   
   transformed parameters {
-    vector<lower=1.00001,upper=1000000>[well] k_mu = (exp(b_conc*conc));
+    // Estimated K/r for training data
+    vector<lower=1.00001,upper=1000000>[well] k_mu = (exp(a_conc+b_conc*conc));
     vector<lower=-10000,upper=10000>[well] r_mu = a_r+(b_temp*temp_norm)+(b_temp2*(temp_norm^2));
+    // Estimated K/r for prediction wells
+    vector<lower=1.00001,upper=1000000>[well_tilde] k_mu_tilde = (exp(a_conc+b_conc*conc_tilde));
+    vector<lower=-10000,upper=10000>[well_tilde] r_mu_tilde = a_r+(b_temp*temp_norm_tilde)+(b_temp2*(temp_norm_tilde^2));
   }
   
   model {
@@ -89,16 +152,24 @@ growthModel <- "
     sd_r ~ exponential(1) T[0.0001,];
     sigma_particles ~ exponential(1) T[0.0001,];
     a_r ~ exponential(1) T[0.0001,];
+    a_conc ~ uniform(0, 10)
     b_conc ~ normal(12, 6) T[5,20];
     b_temp ~ normal(0, 2.5);
     b_temp2 ~ normal(0, 2.5);
     
-    // Carrying capacity/growth rate
+    // Carrying capacity/growth rate for training wells
     for (j in 1:well){
       K[j] ~ lognormal(log(k_mu[j]), sigma_k) T[0.0001,];
       r[j] ~ normal(r_mu[j], sd_r) T[0,];
     }
     
+    // Carrying capacity/growth rate for predictions
+    for (j in 1:well_tilde){
+      K_tilde[j] ~ lognormal(log(k_mu_tilde[j]), sigma_k) T[0.0001,];
+      r_tilde[j] ~ normal(r_mu_tilde[j], sd_r) T[0,];
+    }
+    
+    // Estimated number of particles for training wells
     for (i in 1:N_obs){
       mu_particles[i] = K[well_i[i]]/(1+((K[well_i[i]]-n0[well_i[i]])/n0[well_i[i]])*exp(-1*r[well_i[i]]*timestep[i]));
     }
@@ -107,55 +178,35 @@ growthModel <- "
     particles ~ lognormal(log(mu_particles+1.001), sigma_particles);
     
   }
+  
+  // Predictions for testing wells
+  generated quantities {
+    vector[N_obs_tilde] mu_particles_tilde;
+    vector[N_obs_tilde] particles_tilde;
+    
+    // Estimated number of particles
+    for (i in 1:N_obs_tilde){
+      mu_particles_tilde[i] = K_tilde[well_i_tilde[i]]/(1+((K_tilde[well_i_tilde[i]]-n0_tilde[well_i_tilde[i]])/n0_tilde[well_i_tilde[i]])*exp(-1*r_tilde[well_i_tilde[i]]*timestep_tilde[i]));
+      // Use lognormal_rng to estimate
+      particles_tilde[i] = lognormal_rng(log(mu_particles_tilde[i]+1.001), sigma_particles);
+    }
+  }
 "
-```
-
-```{r PriorChecks}
-# Concentration response
-data.frame(b_conc = rtruncnorm(1000, 5, 20, mean = 12, sd = 3)) |>
-  filter(b_conc >= 1) |>
-  mutate(conc = 0) |>
-  mutate(group = as.character(1:n())) |>
-  complete(nesting(b_conc, group), 
-           conc = seq(0, 0.5, by = 0.01)) |>
-  mutate(k = exp(b_conc*conc)) |>
-  ggplot(aes(x = conc, y = k, group = group)) +
-  geom_line(alpha = 0.1)
-
-
-# Temperature response
-temp <- data.frame(a_r = rexp(1000, 1),
-                   b_temp = rnorm(1000, 0, 2.5),
-                   b_temp2 = rnorm(1000, 0, 2.5),
-                   temp = 0) |>
-  mutate(group = as.character(1:n())) |>
-  complete(nesting(a_r, b_temp, b_temp2, group), 
-           temp = seq(-5, 5, by = 0.1)) |>
-  mutate(r = a_r+(b_temp*temp)+(b_temp2*(temp^2))) |>
-  mutate(r = if_else(r < 0, 0, r))
-temp_med <- temp |>
-  summarise(r = median(r),.by=temp)
-
-ggplot() +
-  geom_line(data = temp, aes(x = temp, y = r, group = group), alpha = 0.1) +
-  geom_line(data = temp_med, aes(x = temp,y=r), colour = "cyan") +
-  geom_vline(aes(xintercept = 0), colour = "orange")+
-  ylim(c(0, 5))
-
 ```
 
 ```{r InitsFunction}
 makeInits <- function(model_data){
   
-  
+  # Parameter starting values
   outList <- list(sigma_particles = 0.1,
                   sd_r = 0.5, 
+                  sigma_k = 0.1,
                   a_r = 1, 
                   b_conc = 12,
                   b_temp = -.01,
-                  b_temp2 = -.01,
-                  sigma_k = 0.1)
+                  b_temp2 = -.01)
   
+  # Starting values
   simData <- data.frame(well = 1:model_data$well,
                         temp = model_data$temp-24,
                         conc = model_data$conc) |>
@@ -165,18 +216,24 @@ makeInits <- function(model_data){
              (outList$b_temp2*(temp^2))) |>
     mutate(r = if_else(r < 0, 0, r))
   
-  simParticles <- simData |>
-    mutate(n0 = model_data$n0) |>
-    mutate(timestep = 1) |>
-    complete(nesting(n0, r, K, temp, conc),
-             timestep = 1:86) |>
-    mutate(mu_particles = (K*n0*exp(r*timestep))/(K+(n0*(exp(r*timestep)-1))))
-    
+  # Create starting values for prediction data too
+  simData_tilde <- data.frame(well = 1:model_data$well_tilde,
+                              temp_tilde = model_data$temp_tilde-24,
+                              conc_tilde = model_data$conc_tilde) |>
+    mutate(K_tilde = (exp(conc_tilde*outList$b_conc)),
+           r_tilde = outList$a_r +
+             (outList$b_temp*temp_tilde) +
+             (outList$b_temp2*(temp_tilde^2))) |>
+    mutate(r_tilde = if_else(r_tilde < 0, 0, r_tilde))
   
   outList$r <- simData$r
   outList$K <- simData$K
   outList$r_mu <- simData$r
-  outList$k_mu <- simData$K
+  outList$K_mu <- simData$K
+  outList$r_tilde <- simData_tilde$r_tilde
+  outList$K_tilde <- simData_tilde$K_tilde
+  outList$r_mu_tilde <- simData_tilde$r_tilde
+  outList$K__mu_tilde <- simData_tilde$K_tilde
   return(outList)
 }
 
@@ -191,8 +248,8 @@ growthModel_fit <- stan(
               makeInits(model_data),
               makeInits(model_data)),
   chains = 4,
-  warmup = 1000,
-  iter = 2000,
+  warmup = 2000,
+  iter = 3000,
   cores = 4,
   refresh = 500
 )
